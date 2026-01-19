@@ -50,13 +50,13 @@ class AccountConfig:
         if not self.expires_at:
             return None
         try:
-            # 解析过期时间（假设为北京时间）
-            beijing_tz = timezone(timedelta(hours=8))
+            # 解析过期时间（按本地时区计算，避免时区不一致导致误判）
+            local_tz = datetime.now().astimezone().tzinfo
             expire_time = datetime.strptime(self.expires_at, "%Y-%m-%d %H:%M:%S")
-            expire_time = expire_time.replace(tzinfo=beijing_tz)
+            expire_time = expire_time.replace(tzinfo=local_tz)
 
-            # 当前时间（北京时间）
-            now = datetime.now(beijing_tz)
+            # 当前时间（本地时区）
+            now = datetime.now(local_tz)
 
             # 计算剩余时间
             remaining = (expire_time - now).total_seconds() / 3600
