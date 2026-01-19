@@ -4,7 +4,7 @@ Gemini自动化登录模块（用于新账号注册）
 import random
 import string
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import quote
 
@@ -467,9 +467,16 @@ class GeminiAutomation:
 
             ses_obj = next((c for c in cookies if c["name"] == "__Secure-C_SES"), None)
             if ses_obj and "expiry" in ses_obj:
-                expires_at = datetime.fromtimestamp(ses_obj["expiry"] - 43200).strftime("%Y-%m-%d %H:%M:%S")
+                expiry_ts = ses_obj["expiry"]
+                expires_at = (
+                    datetime.fromtimestamp(expiry_ts, tz=timezone.utc)
+                    .astimezone()
+                    .strftime("%Y-%m-%d %H:%M:%S")
+                )
             else:
-                expires_at = (datetime.now() + timedelta(hours=12)).strftime("%Y-%m-%d %H:%M:%S")
+                expires_at = (
+                    datetime.now().astimezone() + timedelta(hours=12)
+                ).strftime("%Y-%m-%d %H:%M:%S")
 
             config = {
                 "id": email,
