@@ -3,7 +3,14 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Union, Dict, Any
 from pathlib import Path
 import logging
+from util.patch_uc import patch_undetected_chromedriver
 from dotenv import load_dotenv
+
+try:
+    # Patch distutils usage in undetected_chromedriver for Python 3.12+.
+    patch_undetected_chromedriver()
+except Exception:
+    pass
 
 import httpx
 import aiofiles
