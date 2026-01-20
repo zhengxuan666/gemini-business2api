@@ -414,7 +414,7 @@ class GeminiAutomationUC:
             ses = next((c["value"] for c in cookies if c["name"] == "__Secure-C_SES"), None)
             host = next((c["value"] for c in cookies if c["name"] == "__Host-C_OSES"), None)
 
-            # 计算过期时间
+            # 计算过期时间（使用本地时区）
             ses_obj = next((c for c in cookies if c["name"] == "__Secure-C_SES"), None)
             if ses_obj and "expiry" in ses_obj:
                 expiry_ts = ses_obj["expiry"]
