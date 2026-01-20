@@ -259,10 +259,11 @@ SESSION_EXPIRE_HOURS = config.session.expire_hours
 # ---------- 公开展示配置 ----------
 LOGO_URL = config.public_display.logo_url
 CHAT_URL = config.public_display.chat_url
-
 # ---------- 图片生成配置 ----------
 IMAGE_GENERATION_ENABLED = config.image_generation.enabled
 IMAGE_GENERATION_MODELS = config.image_generation.supported_models
+IMAGE_API_ENABLED = config.image_generation.images_api_enabled
+
 
 # ---------- 重试配置 ----------
 MAX_NEW_SESSION_TRIES = config.retry.max_new_session_tries
@@ -810,6 +811,13 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = 0.7
     top_p: Optional[float] = 1.0
 
+
+class ImageGenerationRequest(BaseModel):
+    prompt: str
+    model: Optional[str] = None
+    n: Optional[int] = 1
+    size: Optional[str] = None
+
 def create_chunk(id: str, created: int, model: str, delta: dict, finish_reason: Union[str, None]) -> str:
     chunk = {
         "id": id,
@@ -1146,6 +1154,7 @@ async def admin_get_settings(request: Request):
         },
         "image_generation": {
             "enabled": config.image_generation.enabled,
+            "images_api_enabled": config.image_generation.images_api_enabled,
             "supported_models": config.image_generation.supported_models,
             "output_format": config.image_generation.output_format
         },
@@ -1170,10 +1179,10 @@ async def admin_get_settings(request: Request):
 @app.put("/admin/settings")
 @require_login()
 async def admin_update_settings(request: Request, new_settings: dict = Body(...)):
-    """更新系统设置"""
     global API_KEY, PROXY, BASE_URL, LOGO_URL, CHAT_URL
-    global IMAGE_GENERATION_ENABLED, IMAGE_GENERATION_MODELS
+    global IMAGE_GENERATION_ENABLED, IMAGE_GENERATION_MODELS, IMAGE_API_ENABLED
     global MAX_NEW_SESSION_TRIES, MAX_REQUEST_RETRIES, MAX_ACCOUNT_SWITCH_TRIES
+
     global ACCOUNT_FAILURE_THRESHOLD, RATE_LIMIT_COOLDOWN_SECONDS, SESSION_CACHE_TTL_SECONDS, AUTO_REFRESH_ACCOUNTS_SECONDS
     global SESSION_EXPIRE_HOURS, multi_account_mgr, http_client
 
@@ -1197,6 +1206,8 @@ async def admin_update_settings(request: Request, new_settings: dict = Body(...)
         if output_format not in ("base64", "url"):
             output_format = "base64"
         image_generation["output_format"] = output_format
+        images_api_enabled = image_generation.get("images_api_enabled", config_manager.images_api_enabled)
+        image_generation["images_api_enabled"] = bool(images_api_enabled)
         new_settings["image_generation"] = image_generation
 
         retry = dict(new_settings.get("retry") or {})
@@ -1225,8 +1236,12 @@ async def admin_update_settings(request: Request, new_settings: dict = Body(...)
         CHAT_URL = config.public_display.chat_url
         IMAGE_GENERATION_ENABLED = config.image_generation.enabled
         IMAGE_GENERATION_MODELS = config.image_generation.supported_models
+        IMAGE_API_ENABLED = config.image_generation.images_api_enabled
+
         MAX_NEW_SESSION_TRIES = config.retry.max_new_session_tries
+
         MAX_REQUEST_RETRIES = config.retry.max_request_retries
+
         MAX_ACCOUNT_SWITCH_TRIES = config.retry.max_account_switch_tries
         ACCOUNT_FAILURE_THRESHOLD = config.retry.account_failure_threshold
         RATE_LIMIT_COOLDOWN_SECONDS = config.retry.rate_limit_cooldown_seconds
@@ -1345,6 +1360,129 @@ async def list_models(authorization: str = Header(None)):
 @app.get("/v1/models/{model_id}")
 async def get_model(model_id: str, authorization: str = Header(None)):
     return {"id": model_id, "object": "model"}
+
+
+@app.post("/v1/images/generations")
+async def images_generations(
+    req: ImageGenerationRequest,
+    request: Request,
+    authorization: Optional[str] = Header(None)
+):
+    verify_api_key(API_KEY, authorization)
+
+    if not IMAGE_GENERATION_ENABLED:
+        raise HTTPException(403, "Image generation disabled")
+    if not IMAGE_API_ENABLED:
+        raise HTTPException(404, "Not Found")
+
+    prompt = (req.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(400, "Prompt is required")
+
+    model_name = (req.model or (IMAGE_GENERATION_MODELS[0] if IMAGE_GENERATION_MODELS else "gemini-auto")).strip()
+    if model_name not in MODEL_MAPPING:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model '{model_name}' not found. Available models: {list(MODEL_MAPPING.keys())}"
+        )
+    if model_name not in IMAGE_GENERATION_MODELS:
+        raise HTTPException(400, f"Model '{model_name}' does not support image generation")
+
+    request_id = str(uuid.uuid4())[:6]
+    created_time = int(time.time())
+
+    try:
+        account_manager = await multi_account_mgr.get_account(None, request_id)
+        session = await create_google_session(account_manager, http_client, USER_AGENT, request_id)
+    except Exception as e:
+        logger.error(f"[IMAGE] [req_{request_id}] 创建会话失败: {type(e).__name__}: {str(e)[:100]}")
+        raise HTTPException(503, f"All accounts unavailable: {str(e)[:100]}")
+
+    tools_spec = {
+        "webGroundingSpec": {},
+        "toolRegistry": "default_tool_registry",
+    }
+    if IMAGE_GENERATION_ENABLED and model_name in IMAGE_GENERATION_MODELS:
+        tools_spec["imageGenerationSpec"] = {}
+        tools_spec["videoGenerationSpec"] = {}
+
+    body = {
+        "configId": account_manager.config.config_id,
+        "additionalParams": {"token": "-"},
+        "streamAssistRequest": {
+            "session": session,
+            "query": {"parts": [{"text": prompt}]},
+            "filter": "",
+            "fileIds": [],
+            "answerGenerationMode": "NORMAL",
+            "toolsSpec": tools_spec,
+            "languageCode": "zh-CN",
+            "userMetadata": {"timeZone": "Asia/Shanghai"},
+            "assistSkippingMode": "REQUEST_ASSIST"
+        }
+    }
+
+    target_model_id = MODEL_MAPPING.get(model_name)
+    if target_model_id:
+        body["streamAssistRequest"]["assistGenerationConfig"] = {
+            "modelId": target_model_id
+        }
+
+    json_objects = []
+    async with http_client.stream(
+        "POST",
+        "https://biz-discoveryengine.googleapis.com/v1alpha/locations/global/widgetStreamAssist",
+        headers=get_common_headers(await account_manager.get_jwt(request_id), USER_AGENT),
+        json=body,
+    ) as r:
+        if r.status_code != 200:
+            error_text = await r.aread()
+            raise HTTPException(status_code=r.status_code, detail=f"Upstream Error {error_text.decode()}")
+
+        async for json_obj in parse_json_array_stream_async(r.aiter_lines()):
+            json_objects.append(json_obj)
+
+    file_ids, session_name = parse_images_from_response(json_objects)
+    if not file_ids or not session_name:
+        return {"created": created_time, "data": []}
+
+    try:
+        n_value = int(req.n) if req.n is not None else None
+    except (TypeError, ValueError):
+        n_value = None
+    if n_value is not None and n_value > 0:
+        file_ids = file_ids[:n_value]
+
+    file_metadata = await get_session_file_metadata(account_manager, session_name, http_client, USER_AGENT, request_id)
+    download_tasks = []
+    for file_info in file_ids:
+        fid = file_info["fileId"]
+        mime = file_info["mimeType"]
+        meta = file_metadata.get(fid, {})
+        correct_session = meta.get("session") or session_name
+        task = download_image_with_jwt(account_manager, correct_session, fid, http_client, USER_AGENT, request_id)
+        download_tasks.append((fid, mime, task))
+
+    results = await asyncio.gather(*[task for _, _, task in download_tasks], return_exceptions=True)
+
+    output_format = config_manager.image_output_format
+    base_url = get_base_url(request)
+    data_items = []
+    image_id_prefix = f"img-{request_id}"
+
+    for (fid, mime, _), result in zip(download_tasks, results):
+        if isinstance(result, Exception):
+            logger.error(f"[IMAGE] [{account_manager.config.account_id}] [req_{request_id}] 图片下载失败: {type(result).__name__}: {str(result)[:100]}")
+            continue
+
+        if output_format == "base64":
+            b64 = base64.b64encode(result).decode()
+            data_items.append({"b64_json": b64})
+        else:
+            image_url = save_image_to_hf(result, image_id_prefix, fid, mime, base_url, IMAGE_DIR)
+            data_items.append({"url": image_url})
+
+    return {"created": created_time, "data": data_items}
 
 # ---------- Auth endpoints (API) ----------
 

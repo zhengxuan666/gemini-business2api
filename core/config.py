@@ -59,6 +59,7 @@ class BasicConfig(BaseModel):
 class ImageGenerationConfig(BaseModel):
     """图片生成配置"""
     enabled: bool = Field(default=True, description="是否启用图片生成")
+    images_api_enabled: bool = Field(default=False, description="是否启用OpenAI Images API兼容端点")
     supported_models: List[str] = Field(
         default=["gemini-3-pro-preview"],
         description="支持图片生成的模型列表"
@@ -282,6 +283,11 @@ class ConfigManager:
     def image_output_format(self) -> str:
         """图片输出格式"""
         return self._config.image_generation.output_format
+
+    @property
+    def images_api_enabled(self) -> bool:
+        """是否启用OpenAI Images API兼容端点"""
+        return self._config.image_generation.images_api_enabled
 
     @property
     def session_expire_hours(self) -> int:
