@@ -436,6 +436,11 @@ async def serve_logo():
         return FileResponse(logo_path)
     raise HTTPException(404, "Not Found")
 
+@app.get("/admin/health")
+async def health_check():
+    """健康检查端点，用于 Docker HEALTHCHECK"""
+    return {"status": "ok"}
+
 # ---------- Session 中间件配置 ----------
 from starlette.middleware.sessions import SessionMiddleware
 app.add_middleware(
@@ -854,10 +859,7 @@ async def admin_logout(request: Request):
     logger.info("[AUTH] Admin logout")
     return {"success": True}
 
-@app.get("/admin/health")
-@require_login()
-async def admin_health(request: Request):
-    return {"status": "ok", "time": datetime.utcnow().isoformat()}
+
 
 @app.get("/admin/stats")
 @require_login()
